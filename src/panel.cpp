@@ -1,7 +1,7 @@
 // Glass panels as ImGui geometry. The look follows the Toon engine's Glass.hlsl, piece by piece, with what a draw list
 // can do in place of a pixel shader:
 //
-//   shadow        a smooth fading ring around the panel, dropped a little, all outside it
+//   shadow        the panel's shape dropped a little, fading out from it, drawn only outside the panel
 //   body          what's behind, frosted, magnified a touch toward the middle: the screen as drawn so far when the
 //                 game's renderer hands it over, else the game's blurred frame
 //   rim           a ring of triangles between the edge and the bezel, whose texture coordinates reach outside the
@@ -131,9 +131,20 @@ void FillGradient(ImDrawList* draw, const Outline& outline, const ImVec2& middle
   }
 }
 
-// A soft shadow dropped under the panel, as Toon's: darkest at the panel and fading outward, smooth because it's
-// rings of triangles whose corners carry the fade. It stays outside the panel, starting as far out as it drops, so
-// it's never under the panel and isn't part of what the panel shows of what's behind it.
+// How far a point is outside a rounded box, as Glass.hlsl's RoundedBox: negative inside.
+float RoundedBoxDistance(const ImVec2& point, const ImVec2& min, const ImVec2& max, float radius) {
+  const ImVec2 half((max.x - min.x) * 0.5f, (max.y - min.y) * 0.5f);
+  const float r = std::min(radius, std::min(half.x, half.y));
+  const float qx = std::abs(point.x - (min.x + max.x) * 0.5f) - half.x + r;
+  const float qy = std::abs(point.y - (min.y + max.y) * 0.5f) - half.y + r;
+  const float outside = std::sqrt(std::max(qx, 0.0f) * std::max(qx, 0.0f) + std::max(qy, 0.0f) * std::max(qy, 0.0f));
+  return outside + std::min(std::max(qx, qy), 0.0f) - r;
+}
+
+// A soft shadow dropped under the panel, as in Glass.hlsl: the panel's shape moved down by the drop, darkest at its
+// edge and fading with distance from it. So it hugs the panel's sides, shows as a thin band above and a fuller one
+// below. It's drawn only outside the panel, from the panel's own edge outward, so it's never under the panel and
+// isn't part of what the panel shows of what's behind it. Smooth, as rings of triangles whose corners carry the fade.
 void AddShadow(ImDrawList* draw, const Panel& panel, float radius, int steps, float opacity) {
   const float scale = panel.scale;
   const float drop = kShadowDrop * scale;
@@ -141,14 +152,20 @@ void AddShadow(ImDrawList* draw, const Panel& panel, float radius, int steps, fl
   const ImVec2 low(panel.min.x, panel.min.y + drop);
   const ImVec2 high(panel.max.x, panel.max.y + drop);
   const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
-  const auto alpha = [&](int ring) { return ring >= kShadowRings ? 0.0f : 0.38f * std::exp(-extent * static_cast<float>(ring) / kShadowRings / (6.0f * scale)) * opacity; };
-  Outline inner = RoundedOutline(low, high, radius, -drop, steps, panel.corners);
-  for (int ring = 1; ring <= kShadowRings; ++ring) {
-    Outline outer = RoundedOutline(low, high, radius, -(drop + extent * static_cast<float>(ring) / kShadowRings), steps, panel.corners);
-    const ImU32 outer_color = Color(0.0f, 0.0f, 0.0f, alpha(ring));
-    const ImU32 inner_color = Color(0.0f, 0.0f, 0.0f, alpha(ring - 1));
-    AddRing(draw, outer, inner, [&](int) { return std::pair(uv, outer_color); }, [&](int) { return std::pair(uv, inner_color); });
+  const auto shade = [&](float distance) { return Color(0.0f, 0.0f, 0.0f, 0.38f * std::exp(-std::max(distance, 0.0f) / (6.0f * scale)) * opacity); };
+
+  // From the panel's edge, shaded by how far each point is from the dropped shape, to the dropped shape grown by
+  // the drop, which is outside the panel all round. Then out from there to nothing.
+  Outline inner = RoundedOutline(panel.min, panel.max, radius, 0.0f, steps, panel.corners);
+  std::vector<ImU32> inner_colors;
+  for (const ImVec2& point : inner.points) inner_colors.push_back(shade(RoundedBoxDistance(point, low, high, radius)));
+  for (int ring = 0; ring <= kShadowRings; ++ring) {
+    const float distance = drop + extent * static_cast<float>(ring) / kShadowRings;
+    Outline outer = RoundedOutline(low, high, radius, -distance, steps, panel.corners);
+    const ImU32 outer_color = ring == kShadowRings ? Color(0.0f, 0.0f, 0.0f, 0.0f) : shade(distance);
+    AddRing(draw, outer, inner, [&](int) { return std::pair(uv, outer_color); }, [&](int i) { return std::pair(uv, inner_colors[static_cast<size_t>(i)]); });
     inner = std::move(outer);
+    inner_colors.assign(inner.points.size(), outer_color);
   }
 }
 
