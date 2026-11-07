@@ -50,19 +50,42 @@ void AddRadialGradient(ImDrawList* draw, const ImVec2& center, float radius, ImU
   }
 }
 
+// Where a light is at `seconds`, drifting around the area.
+ImVec2 LightCenter(const Light& light, const ImVec2& min, const ImVec2& size, float seconds) { return ImVec2(min.x + size.x * (0.5f + 0.42f * std::sin(seconds * light.speed_x + light.phase)), min.y + size.y * (0.5f + 0.42f * std::cos(seconds * light.speed_y + light.phase * 1.3f))); }
+
+// The deep blue the lights drift over, from the top left corner clockwise.
+constexpr ImU32 kCorners[4] = {IM_COL32(16, 18, 34, 255), IM_COL32(20, 16, 36, 255), IM_COL32(8, 10, 20, 255), IM_COL32(10, 9, 22, 255)};
+
 }  // namespace
 
 void DrawAurora(ImDrawList* draw, const ImVec2& min, const ImVec2& max, float seconds, float opacity) {
   const ImVec2 size(max.x - min.x, max.y - min.y);
   if (!draw || size.x <= 0.0f || size.y <= 0.0f || opacity <= 0.0f) return;
   draw->PushClipRect(min, max, true);
-  draw->AddRectFilledMultiColor(min, max, WithOpacity(IM_COL32(16, 18, 34, 255), opacity), WithOpacity(IM_COL32(20, 16, 36, 255), opacity), WithOpacity(IM_COL32(8, 10, 20, 255), opacity), WithOpacity(IM_COL32(10, 9, 22, 255), opacity));
+  draw->AddRectFilledMultiColor(min, max, WithOpacity(kCorners[0], opacity), WithOpacity(kCorners[1], opacity), WithOpacity(kCorners[2], opacity), WithOpacity(kCorners[3], opacity));
+  const float larger = std::max(size.x, size.y);
+  for (const Light& light : kLights) AddRadialGradient(draw, LightCenter(light, min, size, seconds), larger * light.size, WithOpacity(ImGui::ColorConvertFloat4ToU32(light.color), opacity));
+  draw->PopClipRect();
+}
+
+ImU32 AuroraColor(const ImVec2& min, const ImVec2& max, float seconds, const ImVec2& point) {
+  const ImVec2 size(std::max(max.x - min.x, 1.0f), std::max(max.y - min.y, 1.0f));
+  const float u = std::clamp((point.x - min.x) / size.x, 0.0f, 1.0f);
+  const float v = std::clamp((point.y - min.y) / size.y, 0.0f, 1.0f);
+  ImVec4 corner[4];
+  for (int i = 0; i < 4; ++i) corner[i] = ImGui::ColorConvertU32ToFloat4(kCorners[i]);
+  const auto mix = [](const ImVec4& a, const ImVec4& b, float t) { return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, 1.0f); };
+  ImVec4 color = mix(mix(corner[0], corner[1], u), mix(corner[3], corner[2], u), v);
+
+  // Each light over it as DrawAurora blends it: its color fading linearly to nothing at its radius.
   const float larger = std::max(size.x, size.y);
   for (const Light& light : kLights) {
-    const ImVec2 center(min.x + size.x * (0.5f + 0.42f * std::sin(seconds * light.speed_x + light.phase)), min.y + size.y * (0.5f + 0.42f * std::cos(seconds * light.speed_y + light.phase * 1.3f)));
-    AddRadialGradient(draw, center, larger * light.size, WithOpacity(ImGui::ColorConvertFloat4ToU32(light.color), opacity));
+    const ImVec2 center = LightCenter(light, min, size, seconds);
+    const float distance = std::sqrt((point.x - center.x) * (point.x - center.x) + (point.y - center.y) * (point.y - center.y));
+    const float alpha = light.color.w * std::max(0.0f, 1.0f - distance / (larger * light.size));
+    color = mix(color, light.color, alpha);
   }
-  draw->PopClipRect();
+  return ImGui::ColorConvertFloat4ToU32(color);
 }
 
 }  // namespace rexglass

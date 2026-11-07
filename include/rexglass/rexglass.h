@@ -57,6 +57,12 @@ struct Config {
   // frame, while the UI draws. From the game's own renderer; unset, glass has nothing to show through and is
   // tinted only. The same as RexLiveless's Config::blurred_game_frame, so a game can pass one function to both.
   std::function<rex::ui::ImmediateTexture*(float sigma, float uv[4])> backdrop;
+  // The screen as drawn so far, blurred by a Gaussian of `sigma` window pixels (0 for sharp), as an image the UI can
+  // draw, or null. From a game whose renderer draws the UI itself: when its drawer comes to a draw using the image,
+  // it first refreshes it from what it has drawn, if something was drawn there since. So every panel shows what's
+  // really under it, the game and the UI alike: other windows, a node editor's wires and nodes. Asked once a frame
+  // for each sigma; uv as for backdrop. Set, it takes the place of backdrop.
+  std::function<rex::ui::ImmediateTexture*(float sigma, float uv[4])> screen;
   // How blurred the backdrop is, in window pixels at scale 1.
   float blur = 12.0f;
 };
@@ -70,6 +76,8 @@ void SetStyle(const WindowStyle& style);
 
 // The game's blurred frame for this frame, and the part of it covering the screen, or ImTextureID_Invalid.
 ImTextureID Backdrop(ImVec4* uv);
+// The screen as drawn so far (Config::screen), blurred by the config's blur or sharp, or ImTextureID_Invalid.
+ImTextureID Screen(bool blurred, ImVec4* uv);
 
 // A window of glass whatever all_windows says: ImGui::Begin with a see-through background and border, marked as
 // glass. Always pair it with ImGui::End, as with Begin.
@@ -84,5 +92,8 @@ void ApplyTheme(float scale = 1.0f, Accent accent = {});
 // A slowly drifting backdrop of colored light, for a canvas under glass panels (a node editor). Draws over
 // [min, max] in the draw list. `seconds` drives the drift.
 void DrawAurora(ImDrawList* draw_list, const ImVec2& min, const ImVec2& max, float seconds, float opacity = 1.0f);
+// The aurora's color at a point, as DrawAurora draws it over [min, max], for glass over it to show it through itself
+// (Panel::canvas).
+ImU32 AuroraColor(const ImVec2& min, const ImVec2& max, float seconds, const ImVec2& point);
 
 }  // namespace rexglass

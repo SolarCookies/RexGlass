@@ -21,6 +21,10 @@ struct State {
   int backdrop_frame = -1;
   ImTextureID backdrop = ImTextureID_Invalid;
   ImVec4 backdrop_uv{0.0f, 0.0f, 1.0f, 1.0f};
+  // The same for the screen as drawn so far: sharp and blurred.
+  int screen_frame = -1;
+  ImTextureID screen[2] = {ImTextureID_Invalid, ImTextureID_Invalid};
+  ImVec4 screen_uv[2] = {{0.0f, 0.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}};
 };
 
 State& GetState();

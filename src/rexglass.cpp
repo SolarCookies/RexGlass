@@ -61,6 +61,27 @@ ImTextureID Backdrop(ImVec4* uv) {
   return state.backdrop;
 }
 
+ImTextureID Screen(bool blurred, ImVec4* uv) {
+  State& state = GetState();
+  if (!state.installed || !state.config.screen) return ImTextureID_Invalid;
+  // Both asked once a frame. The images are the same objects frame to frame; the game's drawer refreshes them as it
+  // comes to the draws that use them.
+  const int frame = ImGui::GetFrameCount();
+  if (state.screen_frame != frame) {
+    state.screen_frame = frame;
+    const float sigmas[2] = {0.0f, state.config.blur * state.config.scale};
+    for (int i = 0; i < 2; ++i) {
+      float corners[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+      rex::ui::ImmediateTexture* image = state.config.screen(sigmas[i], corners);
+      state.screen[i] = image ? reinterpret_cast<ImTextureID>(image) : ImTextureID_Invalid;
+      state.screen_uv[i] = ImVec4(corners[0], corners[1], corners[2], corners[3]);
+    }
+  }
+  const int index = blurred ? 1 : 0;
+  if (uv) *uv = state.screen_uv[index];
+  return state.screen[index];
+}
+
 bool BeginWindow(const char* name, bool* open, ImGuiWindowFlags flags) {
   // See-through, so the glass behind shows; the glass draws the edge and the title band.
   const ImVec4 clear(0.0f, 0.0f, 0.0f, 0.0f);

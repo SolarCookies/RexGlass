@@ -1,10 +1,13 @@
 // Glass panels as ImGui geometry. The look follows the Toon engine's Glass.hlsl, piece by piece, with what a draw list
 // can do in place of a pixel shader:
 //
-//   shadow        rings of fading strokes around the panel, dropped a little
-//   body          the backdrop image, magnified a touch toward the middle
+//   shadow        a smooth fading ring around the panel, dropped a little, all outside it
+//   body          what's behind, frosted, magnified a touch toward the middle: the screen as drawn so far when the
+//                 game's renderer hands it over, else the game's blurred frame
 //   rim           a ring of triangles between the edge and the bezel, whose texture coordinates reach outside the
-//                 panel at the edge, so the backdrop bends there like thick glass
+//                 panel at the edge, so what's behind bends there like thick glass, clearer at the very edge
+//   canvas        over a canvas there's no image of, the canvas drawn through the same bend: its colors, and its grid
+//                 split into color along the rim
 //   tint          the body and header colors over it; without a backdrop, more solid, standing in for frost
 //   light         brighter at the top, and along the thick rim, with an iridescent band drifting around it
 //   edge          a darker line just inside the outline and a specular outline lit from the top left
@@ -12,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 #include <rexglass/panel.h>
@@ -74,14 +78,19 @@ Outline RoundedOutline(const ImVec2& min, const ImVec2& max, float radius, float
   return outline;
 }
 
-// Where on the backdrop image a point on the screen is.
+// Where on an image of what's behind a point of the panel's draw list is.
 struct BackdropMap {
   ImTextureID texture = ImTextureID_Invalid;
   ImVec2 origin;  // the screen's top left
   ImVec2 size;    // the screen's size
   ImVec4 uv;
+  // The draw list to the screen, for a transformed draw list; null when it's in screen coordinates.
+  const std::function<ImVec2(const ImVec2&)>* to_screen = nullptr;
 
-  ImVec2 At(const ImVec2& point) const { return ImVec2(uv.x + (point.x - origin.x) / size.x * (uv.z - uv.x), uv.y + (point.y - origin.y) / size.y * (uv.w - uv.y)); }
+  ImVec2 At(const ImVec2& point) const {
+    const ImVec2 screen = to_screen ? (*to_screen)(point) : point;
+    return ImVec2(uv.x + (screen.x - origin.x) / size.x * (uv.z - uv.x), uv.y + (screen.y - origin.y) / size.y * (uv.w - uv.y));
+  }
 };
 
 // A ring of triangles from `outer` to `inner`, which match point for point.
@@ -122,40 +131,170 @@ void FillGradient(ImDrawList* draw, const Outline& outline, const ImVec2& middle
   }
 }
 
-void AddShadow(ImDrawList* draw, const Panel& panel, float radius, float opacity) {
+// A soft shadow dropped under the panel, as Toon's: darkest at the panel and fading outward, smooth because it's
+// rings of triangles whose corners carry the fade. It stays outside the panel, starting as far out as it drops, so
+// it's never under the panel and isn't part of what the panel shows of what's behind it.
+void AddShadow(ImDrawList* draw, const Panel& panel, float radius, int steps, float opacity) {
   const float scale = panel.scale;
+  const float drop = kShadowDrop * scale;
   const float extent = kShadowExtent * scale;
-  const float step = extent / kShadowRings;
-  for (int ring = 0; ring < kShadowRings; ++ring) {
-    const float distance = (static_cast<float>(ring) + 0.5f) * step;
-    const float alpha = 0.38f * std::exp(-distance / (6.0f * scale)) * opacity;
-    const ImVec2 drop(0.0f, kShadowDrop * scale);
-    draw->AddRect(ImVec2(panel.min.x - distance + drop.x, panel.min.y - distance + drop.y), ImVec2(panel.max.x + distance, panel.max.y + distance + drop.y), Color(0.0f, 0.0f, 0.0f, alpha), radius + distance, Corners(panel.corners), step + 0.5f);
+  const ImVec2 low(panel.min.x, panel.min.y + drop);
+  const ImVec2 high(panel.max.x, panel.max.y + drop);
+  const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+  const auto alpha = [&](int ring) { return ring >= kShadowRings ? 0.0f : 0.38f * std::exp(-extent * static_cast<float>(ring) / kShadowRings / (6.0f * scale)) * opacity; };
+  Outline inner = RoundedOutline(low, high, radius, -drop, steps, panel.corners);
+  for (int ring = 1; ring <= kShadowRings; ++ring) {
+    Outline outer = RoundedOutline(low, high, radius, -(drop + extent * static_cast<float>(ring) / kShadowRings), steps, panel.corners);
+    const ImU32 outer_color = Color(0.0f, 0.0f, 0.0f, alpha(ring));
+    const ImU32 inner_color = Color(0.0f, 0.0f, 0.0f, alpha(ring - 1));
+    AddRing(draw, outer, inner, [&](int) { return std::pair(uv, outer_color); }, [&](int) { return std::pair(uv, inner_color); });
+    inner = std::move(outer);
   }
 }
 
-// What shows through: the game, blurred, shrunk a touch toward the middle, and bent outward along the rim.
-void AddBackdrop(ImDrawList* draw, const Panel& panel, const BackdropMap& map, float radius, float bezel, int steps, float opacity) {
+// How the glass bends what's behind it. Each point shown on the panel shows the point behind it: along the rim, one
+// pulled from outside the panel, the more the nearer the edge, and in the middle one a touch nearer the center, so
+// the middle magnifies. It's a mesh of triangles inside each of which the bend is affine, so an image (its texture
+// coordinates) and lines (crossing the triangles) are bent alike through it. The rim's triangles come first.
+struct Warp {
+  std::vector<ImVec2> shown;
+  std::vector<ImVec2> behind;
+  std::vector<int> triangles;  // three vertices each
+  size_t rim_triangles = 0;
+
+  // Rim vertices alternate between the edge and the inner side; the middle's center comes last.
+  bool IsEdge(size_t vertex) const { return vertex + 1 < shown.size() && vertex % 2 == 0; }
+};
+
+// `inset` is where the rim starts inside the edge; `spread` scales the bend, for the color split.
+Warp MakeWarp(const Panel& panel, float radius, float bezel, int steps, float inset, float spread) {
+  const ImVec2 center((panel.min.x + panel.max.x) * 0.5f, (panel.min.y + panel.max.y) * 0.5f);
+  const auto magnified = [&center](const ImVec2& point) { return ImVec2(center.x + (point.x - center.x) * 0.96f, center.y + (point.y - center.y) * 0.96f); };
+  const Outline outer = RoundedOutline(panel.min, panel.max, radius, inset, steps, panel.corners);
+  const Outline inner = RoundedOutline(panel.min, panel.max, radius, bezel, steps, panel.corners);
+  const float bend = std::max(panel.refraction, 0.0f) * bezel * 1.25f * spread;
+  const int count = static_cast<int>(outer.points.size());
+
+  Warp warp;
+  for (int i = 0; i < count; ++i) {
+    const ImVec2& point = outer.points[static_cast<size_t>(i)];
+    const ImVec2& normal = outer.normals[static_cast<size_t>(i)];
+    warp.shown.push_back(point);
+    warp.behind.emplace_back(point.x + normal.x * bend, point.y + normal.y * bend);
+    warp.shown.push_back(inner.points[static_cast<size_t>(i)]);
+    warp.behind.push_back(magnified(inner.points[static_cast<size_t>(i)]));
+  }
+  for (int i = 0; i < count; ++i) {
+    const int a = i * 2;
+    const int b = ((i + 1) % count) * 2;
+    warp.triangles.insert(warp.triangles.end(), {a, b, a + 1, a + 1, b, b + 1});
+  }
+  warp.rim_triangles = warp.triangles.size() / 3;
+  const int middle = static_cast<int>(warp.shown.size());
+  warp.shown.push_back(center);
+  warp.behind.push_back(center);
+  for (int i = 0; i < count; ++i) warp.triangles.insert(warp.triangles.end(), {middle, i * 2 + 1, ((i + 1) % count) * 2 + 1});
+  return warp;
+}
+
+// Draws the warp's triangles [first, last), `vertex` giving each vertex, by its index and the point behind it, its
+// texture coordinate and color.
+void AddWarp(ImDrawList* draw, const Warp& warp, size_t first, size_t last, const auto& vertex) {
+  draw->PrimReserve(static_cast<int>((last - first) * 3), static_cast<int>(warp.shown.size()));
+  const unsigned int base = draw->_VtxCurrentIdx;
+  for (size_t i = 0; i < warp.shown.size(); ++i) {
+    const auto [uv, color] = vertex(i, warp.behind[i]);
+    draw->PrimWriteVtx(warp.shown[i], uv, color);
+  }
+  for (size_t i = first * 3; i < last * 3; ++i) draw->PrimWriteIdx(static_cast<ImDrawIdx>(base + static_cast<unsigned int>(warp.triangles[i])));
+}
+
+// Lines at every multiple of `spacing` across and down, as seen through the warp's triangles [first, last): each
+// triangle shows the piece of a line that crosses what's behind it, where that piece appears on the panel.
+void AddLinesThrough(ImDrawList* draw, const Warp& warp, size_t first, size_t last, float spacing, ImU32 color, float thickness) {
+  // Pieces meet at the triangles' edges; without anti-aliasing they meet without overlapping.
+  const ImDrawListFlags flags = draw->Flags;
+  draw->Flags &= ~ImDrawListFlags_AntiAliasedLines;
+  for (size_t t = first; t < last; ++t) {
+    const int* corner = &warp.triangles[t * 3];
+    for (int axis = 0; axis < 2; ++axis) {
+      const auto along = [axis](const ImVec2& point) { return axis == 0 ? point.x : point.y; };
+      float low = along(warp.behind[static_cast<size_t>(corner[0])]);
+      float high = low;
+      for (int k = 1; k < 3; ++k) {
+        low = std::min(low, along(warp.behind[static_cast<size_t>(corner[k])]));
+        high = std::max(high, along(warp.behind[static_cast<size_t>(corner[k])]));
+      }
+      for (float line = std::ceil(low / spacing) * spacing; line <= high; line += spacing) {
+        ImVec2 ends[2];
+        int found = 0;
+        for (int k = 0; k < 3 && found < 2; ++k) {
+          const size_t a = static_cast<size_t>(corner[k]);
+          const size_t b = static_cast<size_t>(corner[(k + 1) % 3]);
+          const float from = along(warp.behind[a]);
+          const float to = along(warp.behind[b]);
+          if (from == to || (from - line) * (to - line) > 0.0f) continue;
+          const float at = (line - from) / (to - from);
+          ends[found++] = ImVec2(warp.shown[a].x + (warp.shown[b].x - warp.shown[a].x) * at, warp.shown[a].y + (warp.shown[b].y - warp.shown[a].y) * at);
+        }
+        if (found == 2) draw->AddLine(ends[0], ends[1], color, thickness);
+      }
+    }
+  }
+  draw->Flags = flags;
+}
+
+// What shows through: what's behind, frosted, shrunk a touch toward the middle, and bent outward along the rim.
+// `sharp`, when there's one, is what's behind unblurred: the rim is clearer than the middle, as in Toon, where the
+// bend shows best.
+void AddBackdrop(ImDrawList* draw, const Panel& panel, const BackdropMap& frosted, const BackdropMap* sharp, float radius, float bezel, int steps, float opacity) {
   const ImVec2 center((panel.min.x + panel.max.x) * 0.5f, (panel.min.y + panel.max.y) * 0.5f);
   const auto magnified = [&center](const ImVec2& point) { return ImVec2(center.x + (point.x - center.x) * 0.96f, center.y + (point.y - center.y) * 0.96f); };
   const ImU32 white = Color(1.0f, 1.0f, 1.0f, opacity);
-  draw->AddImageRounded(ImTextureRef(map.texture), panel.min, panel.max, map.At(magnified(panel.min)), map.At(magnified(panel.max)), white, radius, Corners(panel.corners));
+  draw->AddImageRounded(ImTextureRef(frosted.texture), panel.min, panel.max, frosted.At(magnified(panel.min)), frosted.At(magnified(panel.max)), white, radius, Corners(panel.corners));
   if (panel.refraction <= 0.0f) return;
 
-  // The ring starts a little inside the edge, so the body's anti-aliased edge stays.
-  const Outline outer = RoundedOutline(panel.min, panel.max, radius, 0.75f, steps, panel.corners);
-  const Outline inner = RoundedOutline(panel.min, panel.max, radius, bezel, steps, panel.corners);
-  const float bend = panel.refraction * bezel * 1.25f;
-  draw->PushTexture(ImTextureRef(map.texture));
-  AddRing(
-      draw, outer, inner,
-      [&](int i) {
-        const ImVec2& point = outer.points[static_cast<size_t>(i)];
-        const ImVec2& normal = outer.normals[static_cast<size_t>(i)];
-        return std::pair(map.At(ImVec2(point.x + normal.x * bend, point.y + normal.y * bend)), white);
-      },
-      [&](int i) { return std::pair(map.At(magnified(inner.points[static_cast<size_t>(i)])), white); });
+  // Only the rim, over the body, which already shows the middle. It starts a little inside the edge, so the body's
+  // anti-aliased edge stays.
+  const Warp warp = MakeWarp(panel, radius, bezel, steps, 0.75f, 1.0f);
+  draw->PushTexture(ImTextureRef(frosted.texture));
+  AddWarp(draw, warp, 0, warp.rim_triangles, [&](size_t, const ImVec2& behind) { return std::pair(frosted.At(behind), white); });
   draw->PopTexture();
+  if (!sharp) return;
+
+  // The sharp image over it, solid at the edge and gone where the rim meets the middle.
+  draw->PushTexture(ImTextureRef(sharp->texture));
+  const ImU32 clear = Color(1.0f, 1.0f, 1.0f, 0.0f);
+  const ImU32 edge = Color(1.0f, 1.0f, 1.0f, 0.75f * opacity);
+  AddWarp(draw, warp, 0, warp.rim_triangles, [&](size_t vertex, const ImVec2& behind) { return std::pair(sharp->At(behind), warp.IsEdge(vertex) ? edge : clear); });
+  draw->PopTexture();
+}
+
+// What shows through over a canvas: its colors and its grid, bent alike, the grid split into color along the rim as
+// light of each color bends by its own amount.
+void AddCanvas(ImDrawList* draw, const Panel& panel, const Canvas& canvas, float radius, float bezel, int steps, float opacity) {
+  const Warp warp = MakeWarp(panel, radius, bezel, steps, 0.0f, 1.0f);
+  const size_t all = warp.triangles.size() / 3;
+  const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+  AddWarp(draw, warp, 0, all, [&](size_t, const ImVec2& behind) {
+    ImVec4 color = ImGui::ColorConvertU32ToFloat4(canvas.color(behind));
+    color.w *= opacity;
+    return std::pair(uv, ImGui::ColorConvertFloat4ToU32(color));
+  });
+  if (canvas.grid_spacing <= 0.0f || (canvas.grid_color & IM_COL32_A_MASK) == 0) return;
+
+  const ImVec4 grid = ImGui::ColorConvertU32ToFloat4(canvas.grid_color);
+  const float alpha = grid.w * opacity;
+  const float thickness = canvas.grid_thickness;
+  // Red bends more and blue less than the rest, as in Toon's Glass.hlsl. Where the bend fades they meet again, under
+  // the line drawn last.
+  if (panel.refraction > 0.0f) {
+    const Warp red = MakeWarp(panel, radius, bezel, steps, 0.0f, 1.3f);
+    const Warp blue = MakeWarp(panel, radius, bezel, steps, 0.0f, 0.7f);
+    AddLinesThrough(draw, red, 0, red.rim_triangles, canvas.grid_spacing, Color(1.0f, 0.35f, 0.35f, alpha), thickness);
+    AddLinesThrough(draw, blue, 0, blue.rim_triangles, canvas.grid_spacing, Color(0.35f, 0.55f, 1.0f, alpha), thickness);
+  }
+  AddLinesThrough(draw, warp, 0, all, canvas.grid_spacing, Color(grid, alpha), thickness);
 }
 
 void AddTint(ImDrawList* draw, const Panel& panel, float radius, bool backdrop, float opacity) {
@@ -282,21 +421,29 @@ void AddPanel(ImDrawList* draw, const Panel& panel) {
   const int steps = CornerSteps(radius);
   const float seconds = static_cast<float>(ImGui::GetTime());
 
-  BackdropMap map;
-  if (panel.backdrop != ImTextureID_Invalid) {
-    map.texture = panel.backdrop;
-    map.uv = panel.backdrop_uv;
-  } else if (panel.see_game) {
-    map.texture = Backdrop(&map.uv);
-  }
+  // What's behind, best first: the screen as drawn so far, which holds the UI under the panel as well as the game;
+  // an image of the game; a canvas the panel describes.
   const ImGuiViewport* viewport = ImGui::GetMainViewport();
-  map.origin = viewport->Pos;
-  map.size = ImVec2(std::max(viewport->Size.x, 1.0f), std::max(viewport->Size.y, 1.0f));
-  const bool backdrop = map.texture != ImTextureID_Invalid;
+  BackdropMap frosted;
+  frosted.origin = viewport->Pos;
+  frosted.size = ImVec2(std::max(viewport->Size.x, 1.0f), std::max(viewport->Size.y, 1.0f));
+  frosted.to_screen = panel.to_screen ? &panel.to_screen : nullptr;
+  BackdropMap sharp = frosted;
+  frosted.texture = Screen(true, &frosted.uv);
+  sharp.texture = frosted.texture != ImTextureID_Invalid ? Screen(false, &sharp.uv) : ImTextureID_Invalid;
+  if (frosted.texture == ImTextureID_Invalid && panel.backdrop != ImTextureID_Invalid) {
+    frosted.texture = panel.backdrop;
+    frosted.uv = panel.backdrop_uv;
+  } else if (frosted.texture == ImTextureID_Invalid && panel.see_game) {
+    frosted.texture = Backdrop(&frosted.uv);
+  }
+  const bool image = frosted.texture != ImTextureID_Invalid;
+  const bool canvas = !image && panel.canvas && panel.canvas->color;
 
-  if (panel.shadow) AddShadow(draw, panel, radius, opacity);
-  if (backdrop) AddBackdrop(draw, panel, map, radius, bezel, steps, opacity);
-  AddTint(draw, panel, radius, backdrop, opacity);
+  if (image) AddBackdrop(draw, panel, frosted, sharp.texture != ImTextureID_Invalid ? &sharp : nullptr, radius, bezel, steps, opacity);
+  else if (canvas) AddCanvas(draw, panel, *panel.canvas, radius, bezel, steps, opacity);
+  if (panel.shadow) AddShadow(draw, panel, radius, steps, opacity);
+  AddTint(draw, panel, radius, image || canvas, opacity);
   AddLight(draw, panel, radius, bezel, steps, seconds, opacity);
   AddEdge(draw, panel, radius, steps, opacity);
   AddGlow(draw, panel, radius, opacity);
