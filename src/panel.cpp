@@ -446,16 +446,18 @@ void AddPanel(ImDrawList* draw, const Panel& panel) {
   frosted.size = ImVec2(std::max(viewport->Size.x, 1.0f), std::max(viewport->Size.y, 1.0f));
   frosted.to_screen = panel.to_screen ? &panel.to_screen : nullptr;
   BackdropMap sharp = frosted;
-  frosted.texture = Screen(true, &frosted.uv);
+  frosted.texture = panel.see_through ? Screen(true, &frosted.uv) : ImTextureID_Invalid;
   sharp.texture = frosted.texture != ImTextureID_Invalid ? Screen(false, &sharp.uv) : ImTextureID_Invalid;
-  if (frosted.texture == ImTextureID_Invalid && panel.backdrop != ImTextureID_Invalid) {
+  if (!panel.see_through) {
+    // Tinted glass only.
+  } else if (frosted.texture == ImTextureID_Invalid && panel.backdrop != ImTextureID_Invalid) {
     frosted.texture = panel.backdrop;
     frosted.uv = panel.backdrop_uv;
   } else if (frosted.texture == ImTextureID_Invalid && panel.see_game) {
     frosted.texture = Backdrop(&frosted.uv);
   }
   const bool image = frosted.texture != ImTextureID_Invalid;
-  const bool canvas = !image && panel.canvas && panel.canvas->color;
+  const bool canvas = panel.see_through && !image && panel.canvas && panel.canvas->color;
 
   if (image) AddBackdrop(draw, panel, frosted, sharp.texture != ImTextureID_Invalid ? &sharp : nullptr, radius, bezel, steps, opacity);
   else if (canvas) AddCanvas(draw, panel, *panel.canvas, radius, bezel, steps, opacity);

@@ -13,7 +13,7 @@ include_guard(GLOBAL)
 
 function(rexglass_attach target)
   set(dir ${CMAKE_CURRENT_FUNCTION_LIST_DIR})
-  set(sources ${dir}/src/aurora.cpp ${dir}/src/panel.cpp ${dir}/src/rexglass.cpp ${dir}/src/theme.cpp ${dir}/src/windows.cpp)
+  set(sources ${dir}/src/aurora.cpp ${dir}/src/panel.cpp ${dir}/src/rexglass.cpp ${dir}/src/theme.cpp ${dir}/src/widgets.cpp ${dir}/src/windows.cpp)
   target_sources(${target} PRIVATE ${sources})
   target_include_directories(${target} PRIVATE ${dir}/include)
   # ImGui lives in the SDK's runtime library, which exports its functions but not its data, so RexGlass's use of

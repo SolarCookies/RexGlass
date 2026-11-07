@@ -66,6 +66,10 @@ struct Panel {
   // which would show the game through the UI as a hole. The screen as drawn so far (Config::screen) shows the UI
   // under it too, so with it every panel shows what's under it whatever this says.
   bool see_game = true;
+  // Off, nothing behind is sampled at all, the screen included: tinted glass with its rim and light only. Cheap, for
+  // small widgets sitting on glass already, such as buttons, which would otherwise each ask the renderer for the
+  // screen again.
+  bool see_through = true;
   // An image of what's behind, covering the whole screen, used instead of the game's frame: a module that blurs the
   // game itself passes its own. uv is the part of the image that covers the screen: u0, v0, u1, v1.
   ImTextureID backdrop = ImTextureID_Invalid;

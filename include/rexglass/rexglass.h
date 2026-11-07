@@ -90,8 +90,9 @@ void MarkWindow();
 void ApplyTheme(float scale = 1.0f, Accent accent = {});
 
 // A slowly drifting backdrop of colored light, for a canvas under glass panels (a node editor). Draws over
-// [min, max] in the draw list. `seconds` drives the drift.
-void DrawAurora(ImDrawList* draw_list, const ImVec2& min, const ImVec2& max, float seconds, float opacity = 1.0f);
+// [min, max] in the draw list. `seconds` drives the drift. With `rounding`, the corners `corners` names
+// (ImDrawFlags_RoundCorners*, 0 for all) are rounded, so the aurora can fill a window.
+void DrawAurora(ImDrawList* draw_list, const ImVec2& min, const ImVec2& max, float seconds, float opacity = 1.0f, float rounding = 0.0f, ImDrawFlags corners = 0);
 // The aurora's color at a point, as DrawAurora draws it over [min, max], for glass over it to show it through itself
 // (Panel::canvas).
 ImU32 AuroraColor(const ImVec2& min, const ImVec2& max, float seconds, const ImVec2& point);
