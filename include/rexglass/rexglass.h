@@ -1,7 +1,8 @@
 // RexGlass: glass for ImGui in rexglue projects, after the Liquid Glass UI of the Toon engine.
 //
-//   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
-//     rexglass::Install(drawer, {.all_windows = true, .theme = true});
+//   rex::Result<void> OnInit() override {
+//     rexglass::Install(GetUI().GetImGuiIO().Ctx, {.all_windows = true, .theme = true});
+//     return rex::Ok();
 //   }
 //
 // Windows become glass panels (rexglass/panel.h): every ImGui window with all_windows, or the ones a module opens
@@ -17,11 +18,6 @@
 #include <functional>
 
 #include <imgui.h>
-
-namespace rex::ui {
-class ImGuiDrawer;
-class ImmediateTexture;
-}  // namespace rex::ui
 
 namespace rexglass {
 
@@ -52,23 +48,24 @@ struct Config {
   // The UI scale, so rims, outlines and the theme's sizes grow with it.
   float scale = 1.0f;
 
-  // The game's frame, blurred by a Gaussian of `sigma` window pixels, as an image the UI can draw, or null when
-  // there's none this frame. uv is the part of the image that covers the window (u0, v0, u1, v1). Asked once a
+  // The game's frame, blurred by a Gaussian of `sigma` window pixels, as an image the UI can draw, or
+  // ImTextureID_Invalid when there's none this frame. uv is the part of the image that covers the window (u0, v0, u1, v1). Asked once a
   // frame, while the UI draws. From the game's own renderer; unset, glass has nothing to show through and is
   // tinted only. The same as RexLiveless's Config::blurred_game_frame, so a game can pass one function to both.
-  std::function<rex::ui::ImmediateTexture*(float sigma, float uv[4])> backdrop;
+  std::function<ImTextureID(float sigma, float uv[4])> backdrop;
   // The screen as drawn so far, blurred by a Gaussian of `sigma` window pixels (0 for sharp), as an image the UI can
-  // draw, or null. From a game whose renderer draws the UI itself: when its drawer comes to a draw using the image,
+  // draw, or ImTextureID_Invalid. From a game whose renderer draws the UI itself: when its drawer comes to a draw using the image,
   // it first refreshes it from what it has drawn, if something was drawn there since. So every panel shows what's
   // really under it, the game and the UI alike: other windows, a node editor's wires and nodes. Asked once a frame
   // for each sigma; uv as for backdrop. Set, it takes the place of backdrop.
-  std::function<rex::ui::ImmediateTexture*(float sigma, float uv[4])> screen;
+  std::function<ImTextureID(float sigma, float uv[4])> screen;
   // How blurred the backdrop is, in window pixels at scale 1.
   float blur = 12.0f;
 };
 
-// Sets RexGlass up on the app's ImGui. Call once, from ReXApp::OnCreateDialogs.
-void Install(rex::ui::ImGuiDrawer* drawer, Config config);
+// Sets RexGlass up on an ImGui context: the UI system's, GetUI().GetImGuiIO().Ctx. Call once, from OnInit on the UI
+// thread.
+void Install(ImGuiContext* context, Config config);
 bool Installed();
 const Config& GetConfig();
 // Changes the look after Install, as a settings menu might.
