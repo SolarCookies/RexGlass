@@ -4,8 +4,6 @@
 
 #include <imgui_internal.h>
 
-#include <rex/ui/imgui_drawer.h>
-
 #include "state.h"
 
 namespace rexglass {
@@ -15,19 +13,20 @@ State& GetState() {
   return state;
 }
 
-void Install(rex::ui::ImGuiDrawer* drawer, Config config) {
+void Install(ImGuiContext* context, Config config) {
   State& state = GetState();
-  if (state.installed || !drawer) return;
+  if (state.installed || !context) return;
   state.config = std::move(config);
   state.installed = true;
 
-  // GetIO makes the drawer's context current, which the hook goes on.
-  drawer->GetIO();
+  // The theme below restyles the current context, so it's this one until Install returns.
+  ImGuiContext* previous = ImGui::GetCurrentContext();
+  ImGui::SetCurrentContext(context);
   ImGuiContextHook hook;
   hook.Type = ImGuiContextHookType_RenderPost;
   hook.Owner = 0;
-  hook.Callback = [](ImGuiContext* context, ImGuiContextHook*) { DecorateWindows(*context); };
-  ImGui::AddContextHook(ImGui::GetCurrentContext(), &hook);
+  hook.Callback = [](ImGuiContext* hooked, ImGuiContextHook*) { DecorateWindows(*hooked); };
+  ImGui::AddContextHook(context, &hook);
 
   if (state.config.theme) {
     ApplyTheme(state.config.scale, state.config.accent);
@@ -37,6 +36,7 @@ void Install(rex::ui::ImGuiDrawer* drawer, Config config) {
     for (ImGuiCol color : {ImGuiCol_WindowBg, ImGuiCol_PopupBg, ImGuiCol_TitleBg, ImGuiCol_TitleBgCollapsed, ImGuiCol_MenuBarBg}) colors[color].w = 0.0f;
     colors[ImGuiCol_TitleBgActive].w = std::min(colors[ImGuiCol_TitleBgActive].w, 0.1f);
   }
+  ImGui::SetCurrentContext(previous);
 }
 
 bool Installed() { return GetState().installed; }
@@ -53,8 +53,7 @@ ImTextureID Backdrop(ImVec4* uv) {
   if (state.backdrop_frame != frame) {
     state.backdrop_frame = frame;
     float corners[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-    rex::ui::ImmediateTexture* image = state.config.backdrop(state.config.blur * state.config.scale, corners);
-    state.backdrop = image ? reinterpret_cast<ImTextureID>(image) : ImTextureID_Invalid;
+    state.backdrop = state.config.backdrop(state.config.blur * state.config.scale, corners);
     state.backdrop_uv = ImVec4(corners[0], corners[1], corners[2], corners[3]);
   }
   if (uv) *uv = state.backdrop_uv;
@@ -72,8 +71,7 @@ ImTextureID Screen(bool blurred, ImVec4* uv) {
     const float sigmas[2] = {0.0f, state.config.blur * state.config.scale};
     for (int i = 0; i < 2; ++i) {
       float corners[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-      rex::ui::ImmediateTexture* image = state.config.screen(sigmas[i], corners);
-      state.screen[i] = image ? reinterpret_cast<ImTextureID>(image) : ImTextureID_Invalid;
+      state.screen[i] = state.config.screen(sigmas[i], corners);
       state.screen_uv[i] = ImVec4(corners[0], corners[1], corners[2], corners[3]);
     }
   }
